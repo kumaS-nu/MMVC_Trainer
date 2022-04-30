@@ -151,6 +151,10 @@ def get_hparams(init=True):
                       help='If fine tuning, please specify model(G)')
   parser.add_argument('-fd', '--fine_tuning_d', type=str, default=None,
                       help='If fine tuning, please specify model(D)')
+  parser.add_argument('-b', '--model_g', type=str, default=None,
+                      help='If any to tuning, please specify model(G)')
+  parser.add_argument('-fb', '--fine_tuning_b', type=str, default=None,
+                      help='If fine tuning, please specify model(B)')
   
   args = parser.parse_args()
   model_dir = os.path.join("./logs", args.model)
@@ -177,6 +181,8 @@ def get_hparams(init=True):
     config['fine_model_d'] = args.fine_tuning_d
   else:
     config['fine_flag'] = False
+    config['model_g'] = args.model_g
+    config['fine_tuning_b'] = args.fine_tuning_b
   
   hparams = HParams(**config)
   hparams.model_dir = model_dir
