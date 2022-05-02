@@ -243,7 +243,7 @@ def evaluate(hps, generator, net_b, eval_loader, writer_eval):
           bypass_z, bypass_m, bypass_logs, bypass_y_mask = net_b(spec, spec_lengths)
           bypass_z_any = generator.flow_(bypass_z, bypass_y_mask, speakers)
           bypass_z_slice, bypass_ids_slice = commons.rand_slice_segments(bypass_z_any, spec_lengths, hps.train.segment_size // hps.data.hop_length)
-          bypass_out = generator.dec_(bypass_z_slice, speakers)
+          bypass_out = generator.dec_(bypass_z_slice)
 
           mel = spec_to_mel_torch(
           spec, 
