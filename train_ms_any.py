@@ -15,6 +15,7 @@ from torch.cuda.amp import autocast, GradScaler
 import datetime
 import pytz
 from tqdm import tqdm
+import warnings
 
 import commons
 import utils
@@ -40,6 +41,11 @@ from text.symbols import symbols
 
 torch.backends.cudnn.benchmark = True
 global_step = 0
+
+#stftの警告対策
+warnings.resetwarnings()
+warnings.simplefilter('ignore', UserWarning)
+warnings.simplefilter('ignore', DeprecationWarning)
 
 
 def main():
@@ -150,7 +156,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
       bypass_z, bypass_m, bypass_logs, bypass_y_mask = net_b(spec, spec_lengths)
       bypass_z_any = net_g.flow_(bypass_z, bypass_y_mask, speakers)
       bypass_z_slice, bypass_ids_slice = commons.rand_slice_segments(bypass_z_any, spec_lengths, hps.train.segment_size // hps.data.hop_length)
-      bypass_out = net_g.dec_(bypass_z_slice, speakers)
+      bypass_out = net_g.dec_(bypass_z_slice)
 
       mel = spec_to_mel_torch(
           spec, 
@@ -160,16 +166,17 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
           hps.data.mel_fmin, 
           hps.data.mel_fmax)
       y_mel = commons.slice_segments(mel, bypass_ids_slice, hps.train.segment_size // hps.data.hop_length)
-      bypass_out_mel = mel_spectrogram_torch(
-          bypass_out.squeeze(1), 
-          hps.data.filter_length, 
-          hps.data.n_mel_channels, 
-          hps.data.sampling_rate, 
-          hps.data.hop_length, 
-          hps.data.win_length, 
-          hps.data.mel_fmin, 
-          hps.data.mel_fmax
-      )
+    bypass_out = bypass_out.float()
+    bypass_out_mel = mel_spectrogram_torch(
+        bypass_out.squeeze(1), 
+        hps.data.filter_length, 
+        hps.data.n_mel_channels, 
+        hps.data.sampling_rate, 
+        hps.data.hop_length, 
+        hps.data.win_length, 
+        hps.data.mel_fmin, 
+        hps.data.mel_fmax
+    )
 
     with autocast(enabled=hps.train.fp16_run):
       # Generator
@@ -246,17 +253,18 @@ def evaluate(hps, generator, net_b, eval_loader, writer_eval):
           hps.data.mel_fmin, 
           hps.data.mel_fmax)
           y_mel = commons.slice_segments(mel, bypass_ids_slice, hps.train.segment_size // hps.data.hop_length)
-          bypass_out_mel = mel_spectrogram_torch(
-          bypass_out.squeeze(1), 
-          hps.data.filter_length, 
-          hps.data.n_mel_channels, 
-          hps.data.sampling_rate, 
-          hps.data.hop_length, 
-          hps.data.win_length, 
-          hps.data.mel_fmin, 
-          hps.data.mel_fmax
-          )
-          batch_num = batch_idx
+        bypass_out = bypass_out.float()
+        bypass_out_mel = mel_spectrogram_torch(
+            bypass_out.squeeze(1), 
+            hps.data.filter_length, 
+            hps.data.n_mel_channels, 
+            hps.data.sampling_rate, 
+            hps.data.hop_length, 
+            hps.data.win_length, 
+            hps.data.mel_fmin, 
+            hps.data.mel_fmax
+        )
+        batch_num = batch_idx
 
         with autocast(enabled=hps.train.fp16_run):
           with autocast(enabled=False):
