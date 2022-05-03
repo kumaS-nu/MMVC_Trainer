@@ -216,7 +216,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
           images=image_dict,
           scalars=scalar_dict)
 
-      if global_step % hps.train.eval_interval == 1:
+      if global_step % hps.train.eval_interval == 0:
         evaluate(hps, net_g, net_b, eval_loader, writer_eval)
         utils.save_checkpoint(net_b, optim_b, hps.train.learning_rate, epoch, os.path.join(hps.model_dir, "B_{}.pth".format(global_step)))
     global_step += 1
