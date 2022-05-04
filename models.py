@@ -232,6 +232,8 @@ class PosteriorEncoder(nn.Module):
     self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
   def forward(self, x, x_lengths, g=None):
+    if g != None:
+      print("Error?")
     x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
     x = self.pre(x) * x_mask
     x = self.enc(x, x_mask, g=g)
@@ -465,7 +467,8 @@ class SynthesizerTrn(nn.Module):
     else:
       g = None
 
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
+    #z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
+    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
     z_p = self.flow(z, y_mask, g=g)
 
     with torch.no_grad():
@@ -527,7 +530,7 @@ class SynthesizerTrn(nn.Module):
     assert self.n_speakers > 0, "n_speakers have to be larger than 0."
     g_src = self.emb_g(sid_src).unsqueeze(-1)
     g_tgt = self.emb_g(sid_tgt).unsqueeze(-1)
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src)
+    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
     z_p = self.flow(z, y_mask, g=g_src)
     z_hat = self.flow(z_p, y_mask, g=g_tgt, reverse=True)
     o_hat = self.dec(z_hat * y_mask, g=g_tgt)
@@ -537,7 +540,7 @@ class SynthesizerTrn(nn.Module):
     assert self.n_speakers > 0, "n_speakers have to be larger than 0."
     g_src = self.emb_g(sid_src).unsqueeze(-1)
     g_tgt = self.emb_g(sid_tgt).unsqueeze(-1)
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src)
+    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
     o_hat = self.dec(z * y_mask, g=g_tgt)
     return o_hat, y_mask, (z)
 
@@ -545,7 +548,7 @@ class SynthesizerTrn(nn.Module):
     assert self.n_speakers > 0, "n_speakers have to be larger than 0."
     g_src = self.emb_g(sid_src).unsqueeze(-1)
     g_tgt = self.emb_g(sid_tgt).unsqueeze(-1)
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src)
+    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
     o_hat = self.dec(z * y_mask, g=g_src)
     return o_hat, y_mask, (z)
 
@@ -553,7 +556,7 @@ class SynthesizerTrn(nn.Module):
     assert self.n_speakers > 0, "n_speakers have to be larger than 0."
     g_src = self.emb_g(sid_src).unsqueeze(-1)
     g_tgt = self.emb_g(sid_tgt).unsqueeze(-1)
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src)
+    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths)
     z_p = self.flow(z, y_mask, g=g_src)
     z_hat = self.flow(z_p, y_mask, g=g_tgt, reverse=True)
     z_p_hat = self.flow(z_hat, y_mask, g=g_tgt)
