@@ -172,8 +172,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
     speakers = speakers.cuda(rank, non_blocking=True)
 
     with autocast(enabled=hps.train.fp16_run):
-      y_hat, l_length, attn, ids_slice, x_mask, z_mask,\
-      (z, z_p, m_p, logs_p, m_q, logs_q) = net_g(x, x_lengths, spec, spec_lengths, speakers)
+      y_hat, (l_length_a,l_length_b), (attn_a, attn_b), ids_slice, x_mask, z_mask,\
+      (pe_out, flowa_out, flowb_out, m_te_a, logs_te_a, m_te_b, logs_te_b, m_pe, logs_pe) = net_g(x, x_lengths, spec, spec_lengths, speakers)
       mel = spec_to_mel_torch(
           spec, 
           hps.data.filter_length, 
@@ -210,13 +210,14 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
       # Generator
       y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
       with autocast(enabled=False):
-        loss_dur = torch.sum(l_length.float())
+        loss_dur_a = torch.sum(l_length_a.float())
+        loss_dur_b = torch.sum(l_length_b.float())
         loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
-        loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
-
+        loss_kl_a = kl_loss(flowa_out, logs_pe, m_te_a, logs_te_a, z_mask) * hps.train.c_kl
+        loss_kl_b = kl_loss(flowb_out, logs_pe, m_te_b, logs_te_b, z_mask) * hps.train.c_kl
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, losses_gen = generator_loss(y_d_hat_g)
-        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl
+        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur_a + loss_kl_a + loss_dur_b + loss_kl_b
     optim_g.zero_grad()
     scaler.scale(loss_gen_all).backward()
     scaler.unscale_(optim_g)
@@ -227,7 +228,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
     if rank==0:
       if global_step % hps.train.log_interval == 0:
         lr = optim_g.param_groups[0]['lr']
-        losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
+        losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur_a, loss_kl_a, loss_dur_b, loss_kl_b]
         logger.info('Train Epoch: {} [{:.0f}%]'.format(
           epoch,
           100. * batch_idx / len(train_loader)))
@@ -235,7 +236,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         logger.info([x.item() for x in losses] + [global_step, lr])
         
         scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr, "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
-        scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/dur": loss_dur, "loss/g/kl": loss_kl})
+        scalar_dict.update({"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/dur_a": loss_dur_a, "loss/g/kl_a": loss_kl_a, "loss/g/dur_a": loss_dur_b, "loss/g/kl_a": loss_kl_b})
 
         scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
         scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})
@@ -244,7 +245,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             "slice/mel_org": utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
             "slice/mel_gen": utils.plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()), 
             "all/mel": utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
-            "all/attn": utils.plot_alignment_to_numpy(attn[0,0].data.cpu().numpy())
+            "all/attn_a": utils.plot_alignment_to_numpy(attn_a[0,0].data.cpu().numpy()),
+            "all/attn_b": utils.plot_alignment_to_numpy(attn_b[0,0].data.cpu().numpy())
         }
         utils.summarize(
           writer=writer,
@@ -252,7 +254,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
           images=image_dict,
           scalars=scalar_dict)
 
-      if global_step % hps.train.eval_interval == 0:
+      if global_step % hps.train.eval_interval == 0 and global_step != 0:
         evaluate(hps, net_g, eval_loader, writer_eval, logger)
         utils.save_checkpoint(net_g, optim_g, hps.train.learning_rate, epoch, os.path.join(hps.model_dir, "G_{}.pth".format(global_step)))
         utils.save_checkpoint(net_d, optim_d, hps.train.learning_rate, epoch, os.path.join(hps.model_dir, "D_{}.pth".format(global_step)))
@@ -262,7 +264,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
 def evaluate(hps, generator, eval_loader, writer_eval, logger):
     generator.eval()
     scalar_dict = {}
-    scalar_dict.update({"loss/g/mel": 0.0, "loss/g/dur": 0.0, "loss/g/kl": 0.0})
+    scalar_dict.update({"loss/g/mel": 0.0, "loss/g/kl_a": 0.0, "loss/g/kl_b": 0.0})
     with torch.no_grad():
       #evalのデータセットを一周する
       for batch_idx, (x, x_lengths, spec, spec_lengths, y, y_lengths, speakers) in enumerate(tqdm(eval_loader, desc="Epoch {}".format("eval"))):
@@ -273,8 +275,8 @@ def evaluate(hps, generator, eval_loader, writer_eval, logger):
         #autocastはfp16のおまじない
         with autocast(enabled=hps.train.fp16_run):
           #Generator
-          y_hat, l_length, attn, ids_slice, x_mask, z_mask,\
-          (z, z_p, m_p, logs_p, m_q, logs_q) = generator(x, x_lengths, spec, spec_lengths, speakers)
+          y_hat, (l_length_a,l_length_b), (attn_a, attn_b), ids_slice, x_mask, z_mask,\
+          (pe_out, flowa_out, flowb_out, m_te_a, logs_te_a, m_te_b, logs_te_b, m_pe, logs_pe) = generator(x, x_lengths, spec, spec_lengths, speakers)
 
           mel = spec_to_mel_torch(
               spec, 
@@ -301,19 +303,19 @@ def evaluate(hps, generator, eval_loader, writer_eval, logger):
 
         with autocast(enabled=hps.train.fp16_run):
           with autocast(enabled=False):
-            loss_dur = torch.sum(l_length.float())
             loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
-            loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
+            loss_kl_a = kl_loss(flowa_out, logs_pe, m_te_a, logs_te_a, z_mask) * hps.train.c_kl
+            loss_kl_b = kl_loss(flowb_out, logs_pe, m_te_b, logs_te_b, z_mask) * hps.train.c_kl
 
         scalar_dict["loss/g/mel"] = scalar_dict["loss/g/mel"] + loss_mel
-        scalar_dict["loss/g/dur"] = scalar_dict["loss/g/dur"] + loss_dur
-        scalar_dict["loss/g/kl"] = scalar_dict["loss/g/kl"] + loss_kl
+        scalar_dict["loss/g/kl_a"] = scalar_dict["loss/g/kl_a"] + loss_kl_a
+        scalar_dict["loss/g/kl_b"] = scalar_dict["loss/g/kl_b"] + loss_kl_b
       
       #lossをepoch1周の結果をiter単位の平均値に
       scalar_dict["loss/g/mel"] = scalar_dict["loss/g/mel"] / (batch_num+1)
-      scalar_dict["loss/g/dur"] = scalar_dict["loss/g/dur"] / (batch_num+1)
-      scalar_dict["loss/g/kl"] = scalar_dict["loss/g/kl"] / (batch_num+1)
-      logger.info("loss/g/mel : {} loss/g/dur : {} loss/g/kl : {}".format(str(scalar_dict["loss/g/mel"]), str(scalar_dict["loss/g/dur"]), str(scalar_dict["loss/g/kl"])))
+      scalar_dict["loss/g/kl_a"] = scalar_dict["loss/g/kl_a"] / (batch_num+1)
+      scalar_dict["loss/g/kl_b"] = scalar_dict["loss/g/kl_b"] / (batch_num+1)
+      logger.info("loss/g/mel : {} loss/g/kl_a : {} loss/g/kl_b : {}".format(str(scalar_dict["loss/g/mel"]), str(scalar_dict["loss/g/kl_a"]), str(scalar_dict["loss/g/kl_b"])))
 
       #謎の処理
       for batch_idx, (x, x_lengths, spec, spec_lengths, y, y_lengths, speakers) in enumerate(eval_loader):

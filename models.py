@@ -437,7 +437,7 @@ class SynthesizerTrn(nn.Module):
 
     self.use_sdp = use_sdp
 
-    self.enc_p = TextEncoder(n_vocab,
+    self.enc_te = TextEncoder(n_vocab,
         inter_channels,
         hidden_channels,
         filter_channels,
@@ -446,8 +446,9 @@ class SynthesizerTrn(nn.Module):
         kernel_size,
         p_dropout)
     self.dec = Generator(inter_channels, resblock, resblock_kernel_sizes, resblock_dilation_sizes, upsample_rates, upsample_initial_channel, upsample_kernel_sizes, gin_channels=gin_channels)
-    self.enc_q = PosteriorEncoder(spec_channels, inter_channels, hidden_channels, 5, 1, 16, gin_channels=gin_channels)
-    self.flow = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels)
+    self.enc_pe = PosteriorEncoder(spec_channels, inter_channels, hidden_channels, 5, 1, 16, gin_channels=gin_channels)
+    self.flowA = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels)
+    self.flowB = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels)
 
     if use_sdp:
       self.dp = StochasticDurationPredictor(hidden_channels, 192, 3, 0.5, 4, gin_channels=gin_channels)
@@ -457,45 +458,59 @@ class SynthesizerTrn(nn.Module):
     if n_speakers > 1:
       self.emb_g = nn.Embedding(n_speakers, gin_channels)
 
-  def forward(self, x, x_lengths, y, y_lengths, sid=None):
+  def forward(self, te_out, x_lengths, y, y_lengths, sid=None):
 
-    x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
+    te_out, m_te, logs_te, te_out_mask = self.enc_te(te_out, x_lengths)
     if self.n_speakers > 0:
       g = self.emb_g(sid).unsqueeze(-1) # [b, h, 1]
     else:
       g = None
 
-    z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
-    z_p = self.flow(z, y_mask, g=g)
+    pe_out, m_pe, logs_pe, pe_out_mask = self.enc_pe(y, y_lengths, g=g)
+    flowa_out = self.flowA(pe_out, pe_out_mask, g=g)
+    flowa_out_re = self.flowA(flowa_out, pe_out_mask, g=g, reverse=True)
+    flowb_out = self.flowB(flowa_out_re, pe_out_mask, g=g)
 
     with torch.no_grad():
       # negative cross-entropy
-      s_p_sq_r = torch.exp(-2 * logs_p) # [b, d, t]
-      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, t_s]
-      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-      neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-      neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True) # [b, 1, t_s]
-      neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+      s_p_sq_r = torch.exp(-2 * logs_te) # [b, d, t]
+      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_te, [1], keepdim=True) # [b, 1, t_s]
+      neg_cent2_a = torch.matmul(-0.5 * (flowa_out ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent3_a = torch.matmul(flowa_out.transpose(1, 2), (m_te * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent2_b = torch.matmul(-0.5 * (flowb_out ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent3_b = torch.matmul(flowb_out.transpose(1, 2), (m_te * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent4 = torch.sum(-0.5 * (m_te ** 2) * s_p_sq_r, [1], keepdim=True) # [b, 1, t_s]
+      neg_cent_a = neg_cent1 + neg_cent2_a + neg_cent3_a + neg_cent4
+      neg_cent_b = neg_cent1 + neg_cent2_b + neg_cent3_b + neg_cent4
 
-      attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-      attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
+      attn_mask = torch.unsqueeze(te_out_mask, 2) * torch.unsqueeze(pe_out_mask, -1)
+      attn_a = monotonic_align.maximum_path(neg_cent_a, attn_mask.squeeze(1)).unsqueeze(1).detach()
+      attn_b = monotonic_align.maximum_path(neg_cent_b, attn_mask.squeeze(1)).unsqueeze(1).detach()
 
-    w = attn.sum(2)
+    w_a = attn_a.sum(2)
+    w_b = attn_b.sum(2)
     if self.use_sdp:
-      l_length = self.dp(x, x_mask, w, g=g)
-      l_length = l_length / torch.sum(x_mask)
+      l_length_a = self.dp(te_out, te_out_mask, w_a, g=g)
+      l_length_a = l_length_a / torch.sum(te_out_mask)
+      l_length_b = self.dp(te_out, te_out_mask, w_b, g=g)
+      l_length_b = l_length_b / torch.sum(te_out_mask)
     else:
-      logw_ = torch.log(w + 1e-6) * x_mask
-      logw = self.dp(x, x_mask, g=g)
-      l_length = torch.sum((logw - logw_)**2, [1,2]) / torch.sum(x_mask) # for averaging 
+      logw_a_ = torch.log(w_a + 1e-6) * te_out_mask
+      logw_a = self.dp(te_out, te_out_mask, g=g)
+      l_length_a = torch.sum((logw_a - logw_a_)**2, [1,2]) / torch.sum(te_out_mask) # for averaging 
+      logw_b_ = torch.log(w_b + 1e-6) * te_out_mask
+      logw_b = self.dp(te_out, te_out_mask, g=g)
+      l_length_b = torch.sum((logw_b - logw_b_)**2, [1,2]) / torch.sum(te_out_mask) # for averaging 
 
     # expand prior
-    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+    m_te_a = torch.matmul(attn_a.squeeze(1), m_te.transpose(1, 2)).transpose(1, 2)
+    logs_te_a = torch.matmul(attn_a.squeeze(1), logs_te.transpose(1, 2)).transpose(1, 2)
+    m_te_b = torch.matmul(attn_b.squeeze(1), m_te.transpose(1, 2)).transpose(1, 2)
+    logs_te_b = torch.matmul(attn_b.squeeze(1), logs_te.transpose(1, 2)).transpose(1, 2)
 
-    z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size)
+    z_slice, ids_slice = commons.rand_slice_segments(flowa_out_re, y_lengths, self.segment_size)
     o = self.dec(z_slice, g=g)
-    return o, l_length, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+    return o, (l_length_a, l_length_b), (attn_a, attn_b), ids_slice, pe_out_mask, pe_out_mask, (pe_out, flowa_out, flowb_out, m_te_a, logs_te_a, m_te_b, logs_te_b, m_pe, logs_pe)
 
   def infer(self, x, x_lengths, sid=None, noise_scale=1, length_scale=1, noise_scale_w=1., max_len=None):
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
