@@ -468,8 +468,7 @@ class SynthesizerTrn(nn.Module):
 
     pe_out, m_pe, logs_pe, pe_out_mask = self.enc_pe(y, y_lengths, g=g)
     flowa_out = self.flowA(pe_out, pe_out_mask, g=g)
-    flowa_out_re = self.flowA(flowa_out, pe_out_mask, g=g, reverse=True)
-    flowb_out = self.flowB(flowa_out_re, pe_out_mask, g=g)
+    flowb_out = self.flowB(flowa_out, pe_out_mask, g=g)
 
     with torch.no_grad():
       # negative cross-entropy
@@ -508,7 +507,7 @@ class SynthesizerTrn(nn.Module):
     m_te_b = torch.matmul(attn_b.squeeze(1), m_te.transpose(1, 2)).transpose(1, 2)
     logs_te_b = torch.matmul(attn_b.squeeze(1), logs_te.transpose(1, 2)).transpose(1, 2)
 
-    z_slice, ids_slice = commons.rand_slice_segments(flowa_out_re, y_lengths, self.segment_size)
+    z_slice, ids_slice = commons.rand_slice_segments(pe_out, y_lengths, self.segment_size)
     o = self.dec(z_slice, g=g)
     return o, (l_length_a, l_length_b), (attn_a, attn_b), ids_slice, pe_out_mask, pe_out_mask, (pe_out, flowa_out, flowb_out, m_te_a, logs_te_a, m_te_b, logs_te_b, m_pe, logs_pe)
 
