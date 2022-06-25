@@ -1,6 +1,7 @@
 import copy
 import math
 import torch
+import random
 from torch import nn
 from torch.nn import functional as F
 
@@ -457,16 +458,21 @@ class SynthesizerTrn(nn.Module):
     if n_speakers > 1:
       self.emb_g = nn.Embedding(n_speakers, gin_channels)
 
-  def forward(self, x, x_lengths, y, y_lengths, sid=None):
+  def forward(self, x, x_lengths, y, y_lengths,sid=None):
 
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
     if self.n_speakers > 0:
       g = self.emb_g(sid).unsqueeze(-1) # [b, h, 1]
+      tgt_id = self.emb_g((sid + random.randint(1, self.n_speakers - 1)) % self.n_speakers).unsqueeze(-1)
     else:
       g = None
+      tgt_id = None
 
     z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
     z_p = self.flow(z, y_mask, g=g)
+    z_p_tgt = self.flow(z, y_mask, g=tgt_id, reverse=True)
+    z_p_tgt_p = self.flow(z_p_tgt, y_mask, g=tgt_id)
+    z_p_tgt_p_p = self.flow(z_p_tgt_p, y_mask, g=g, reverse=True)
 
     with torch.no_grad():
       # negative cross-entropy
@@ -474,11 +480,15 @@ class SynthesizerTrn(nn.Module):
       neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, t_s]
       neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
       neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent2_hat = torch.matmul(-0.5 * (z_p_tgt_p ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+      neg_cent3_hat = torch.matmul(z_p_tgt_p.transpose(1, 2), (m_p * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
       neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True) # [b, 1, t_s]
       neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+      neg_cent_hat = neg_cent1 + neg_cent2_hat + neg_cent3_hat + neg_cent4
 
       attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
       attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
+      attn_hat = monotonic_align.maximum_path(neg_cent_hat, attn_mask.squeeze(1)).unsqueeze(1).detach()
 
     w = attn.sum(2)
     if self.use_sdp:
@@ -489,13 +499,26 @@ class SynthesizerTrn(nn.Module):
       logw = self.dp(x, x_mask, g=g)
       l_length = torch.sum((logw - logw_)**2, [1,2]) / torch.sum(x_mask) # for averaging 
 
+    w_hat = attn_hat.sum(2)
+    if self.use_sdp:
+      l_length_hat = self.dp(x, x_mask, w, g=tgt_id)
+      l_length_hat = l_length_hat / torch.sum(x_mask)
+    else:
+      logw__hat = torch.log(w_hat + 1e-6) * x_mask
+      logw_hat = self.dp(x, x_mask, g=tgt_id)
+      l_length_hat = torch.sum((logw_hat - logw__hat)**2, [1,2]) / torch.sum(x_mask) # for averaging 
+
     # expand prior
+    m_p_hat = m_p
+    logs_p_hat = logs_p
     m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
     logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+    m_p_hat = torch.matmul(attn_hat.squeeze(1), m_p_hat.transpose(1, 2)).transpose(1, 2)
+    logs_p_hat = torch.matmul(attn_hat.squeeze(1), logs_p_hat.transpose(1, 2)).transpose(1, 2)
 
-    z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size)
+    z_slice, ids_slice = commons.rand_slice_segments(z_p_tgt_p_p, y_lengths, self.segment_size)
     o = self.dec(z_slice, g=g)
-    return o, l_length, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+    return o, l_length, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), (z, z_p_tgt_p, m_p_hat, logs_p_hat, m_q, logs_q)
 
   def infer(self, x, x_lengths, sid=None, noise_scale=1, length_scale=1, noise_scale_w=1., max_len=None):
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)

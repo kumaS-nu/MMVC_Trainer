@@ -182,7 +182,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
 
     with autocast(enabled=hps.train.fp16_run):
       y_hat, l_length, attn, ids_slice, x_mask, z_mask,\
-      (z, z_p, m_p, logs_p, m_q, logs_q) = net_g(x, x_lengths, spec, spec_lengths, speakers)
+      (z, z_p, m_p, logs_p, m_q, logs_q),(_, z_p_, m_p_, logs_p_, _, logs_q_) = net_g(x, x_lengths, spec, spec_lengths, speakers)
       mel = spec_to_mel_torch(
           spec, 
           hps.data.filter_length, 
@@ -222,7 +222,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         loss_dur = torch.sum(l_length.float())
         loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
-
+        loss_kl_ = kl_loss(z_p_, logs_q_, m_p_, logs_p_, z_mask) * hps.train.c_kl
+        loss_kl = loss_kl + loss_kl_
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, losses_gen = generator_loss(y_d_hat_g)
         loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl
@@ -283,7 +284,7 @@ def evaluate(hps, generator, eval_loader, writer_eval, logger):
         with autocast(enabled=hps.train.fp16_run):
           #Generator
           y_hat, l_length, attn, ids_slice, x_mask, z_mask,\
-          (z, z_p, m_p, logs_p, m_q, logs_q) = generator(x, x_lengths, spec, spec_lengths, speakers)
+          (z, z_p, m_p, logs_p, m_q, logs_q),(_, z_p_, m_p_, logs_p_, _, logs_q_)  = generator(x, x_lengths, spec, spec_lengths, speakers)
 
           mel = spec_to_mel_torch(
               spec, 
@@ -313,6 +314,8 @@ def evaluate(hps, generator, eval_loader, writer_eval, logger):
             loss_dur = torch.sum(l_length.float())
             loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
             loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
+            loss_kl_ = kl_loss(z_p_, logs_q_, m_p_, logs_p_, z_mask) * hps.train.c_kl
+            loss_kl = loss_kl + loss_kl_
 
         scalar_dict["loss/g/mel"] = scalar_dict["loss/g/mel"] + loss_mel
         scalar_dict["loss/g/dur"] = scalar_dict["loss/g/dur"] + loss_dur
