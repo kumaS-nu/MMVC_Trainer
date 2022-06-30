@@ -132,3 +132,6 @@ dmypy.json
 .history
 logs/
 *.spec.pt
+
+/dataset/**/*.txt
+/dataset/**/*.wav
