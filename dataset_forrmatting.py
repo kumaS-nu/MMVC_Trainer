@@ -3,6 +3,7 @@ import shutil
 import wave
 import numpy as np
 import pyworld as pw
+import create_dataset_jtalk
 
 
 origin_path = 'dataset/origin/'
@@ -147,7 +148,65 @@ def convert(transcripts):
                 f.setframerate(fr)
                 f.writeframes(conv.tobytes())
 
+def create_datasets():
+    for speaker in range(1, 101):
+        for type in range(1, 4):
+            Correspondence_list = list()
+            output_file_list = list()
+            output_file_list_val = list()
+            jpv_dir = os.join(dst_path, "{:0>3d}".format(speaker) + '_jpv')
+            conv_dir = os.join(dst_path, str(speaker + type * 100) + '_conv' + str(type * 10))
+            jpv_wav = os.listdir(os.path.join(jpv_dir, 'wav'))
+            jpv_text = os.listdir(os.path.join(jpv_dir, 'text'))
+            jpv_wav.sort()
+            jpv_text.sort()
+            conv_wav = os.listdir(os.path.join(conv_dir, 'wav'))
+            conv_text = os.listdir(os.path.join(conv_dir, 'text'))
+            conv_wav.sort()
+            conv_text.sort()
+
+            counter = 0
+            for lab, wav in zip(jpv_text, jpv_wav):
+                with open(lab, 'r', encoding="utf-8") as f:
+                    mozi = f.read().split("\n")
+                test = create_dataset_jtalk.mozi2phone(str(mozi))
+
+                if counter % 10 != 0:
+                    output_file_list.append(wav + "|"+ "107" + "|"+ test + "\n")
+                else:
+                    output_file_list_val.append(wav + "|"+ "107" + "|"+ test + "\n")
+                counter = counter +1
+            Correspondence_list.append("107" + "|" + os.path.basename(jpv_dir) + "\n")
+
+            counter = 0
+            for lab, wav in zip(conv_text, conv_wav):
+                with open(lab, 'r', encoding="utf-8") as f:
+                    mozi = f.read().split("\n")
+                test = create_dataset_jtalk.mozi2phone(str(mozi))
+
+                if counter % 10 != 0:
+                    output_file_list.append(wav + "|"+ "108" + "|"+ test + "\n")
+                else:
+                    output_file_list_val.append(wav + "|"+ "108" + "|"+ test + "\n")
+                counter = counter +1
+            Correspondence_list.append("108" + "|" + os.path.basename(conv_dir) + "\n")
+
+            filename = "{:0>3d}".format(speaker) + "jpv" + str(type * 10)
+            with open('filelists/' + filename + '_textful.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.writelines(output_file_list)
+            with open('filelists/' + filename + '_textful_val.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.writelines(output_file_list_val)
+            with open('filelists/' + filename + '_textless.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.writelines(list())
+            with open('filelists/' + filename + '_val_textless.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.writelines(list())
+            with open('filelists/' + filename + '_Correspondence.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.writelines(Correspondence_list)
+
+            create_dataset_jtalk.create_json(filename, 109, 24000, "./configs/baseconfig.json")
+
 
 if __name__ == '__main__':
     transcripts = load_transcripts()
     convert(transcripts)
+    create_datasets()
